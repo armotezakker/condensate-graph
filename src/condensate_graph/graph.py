@@ -26,6 +26,8 @@ from .contacts import DEFAULT_CUTOFF_NM, ContactSettings, iter_frame_contacts
 
 GRAPH_TYPES = ("pp", "bridged", "combined", "bipartite")
 AXES = ("x", "y", "z")
+SMALL_WORLD_WINDOW = (-0.3, 0.3)  # omega range commonly called small-world
+_MIN_SMALL_WORLD_NODES = 4        # networkx reference graphs need at least 4 nodes
 
 __all__ = [
     "GRAPH_TYPES",
@@ -36,6 +38,8 @@ __all__ = [
     "largest_protein_component",
     "top_hubs",
     "spanning_axes",
+    "small_world",
+    "SMALL_WORLD_WINDOW",
     "graph_metrics",
     "run_graph_metrics",
 ]
@@ -191,6 +195,95 @@ def spanning_axes(edges, start) -> np.ndarray:
     return spans
 
 
+# --------------------------------------------------------------------------- small-world
+
+def small_world(graph, niter=5, nrand=10, seed=0, nodes=None) -> dict:
+    """Small-world coefficients sigma and omega of one connected component.
+
+    Both compare the component with reference graphs that have the same
+    number of nodes and the same degree of every node:
+
+    * sigma = (C / C_rand) / (L / L_rand), where C is the average clustering
+      coefficient (how often a node's neighbours are also linked to each
+      other) and L the average shortest path length (how many steps separate
+      two nodes on average); "rand" means the average over randomly rewired
+      reference graphs. sigma > 1 means more clustered than random at a
+      similar path length. A regular lattice also gives sigma > 1, so sigma
+      alone does not separate small-world from lattice-like networks.
+    * omega = L_rand / L - C / C_latt, where "latt" is a lattice-like
+      reference made by rewiring the graph towards a ring lattice. omega is
+      near 0 for a small-world network, near -1 for a lattice and near +1 for
+      a random graph. The range -0.3 <= omega <= 0.3
+      (:data:`SMALL_WORLD_WINDOW`) is commonly called small-world.
+
+    Both values are stochastic: they depend on the random reference graphs,
+    which are drawn with :func:`networkx.sigma` and :func:`networkx.omega`
+    from the given ``seed``. The same seed gives the same result; repeat with
+    several seeds to see the spread.
+
+    Parameters
+    ----------
+    graph : networkx.Graph
+        Any undirected graph, for example from :func:`build_graphs`.
+    niter : int, optional
+        Rewiring passes per edge for each reference graph (default 5).
+    nrand : int, optional
+        Number of reference graphs averaged (default 10).
+    seed : int, optional
+        Random seed for the reference graphs (default 0).
+    nodes : iterable or None, optional
+        Nodes of the component to analyse. Default: the largest connected
+        component by number of nodes; for graphs from :func:`build_graphs`
+        pass ``largest_protein_component(graph)`` to follow the package's
+        largest-component definition.
+
+    Returns
+    -------
+    dict
+        ``sigma``, ``omega``, ``n_nodes`` and ``n_edges`` of the analysed
+        component, plus ``niter``, ``nrand``, ``seed`` and ``note``.
+        ``sigma`` and ``omega`` are NaN, with the reason in ``note``, when
+        they are not defined: fewer than 4 nodes, a complete graph, or zero
+        clustering in the component or in its reference graphs (for example
+        a tree or a plain cycle).
+
+    Raises
+    ------
+    ValueError
+        If ``nodes`` do not form a connected subgraph.
+    """
+    if nodes is None:
+        comps = list(nx.connected_components(graph))
+        nodes = max(comps, key=len) if comps else set()
+    sub = graph.subgraph(nodes).copy()
+    if sub.number_of_nodes() and not nx.is_connected(sub):
+        raise ValueError("small_world needs a connected set of nodes")
+    n, m = sub.number_of_nodes(), sub.number_of_edges()
+    out = {"sigma": float("nan"), "omega": float("nan"), "n_nodes": n, "n_edges": m,
+           "niter": int(niter), "nrand": int(nrand), "seed": int(seed), "note": ""}
+    if n < _MIN_SMALL_WORLD_NODES:
+        out["note"] = f"component has {n} nodes; at least {_MIN_SMALL_WORLD_NODES} are needed"
+        return out
+    if m == n * (n - 1) // 2:
+        out["note"] = "component is a complete graph; it cannot be rewired"
+        return out
+    if nx.average_clustering(sub) == 0.0:
+        out["note"] = "component has zero clustering (no triangles); sigma and omega are undefined"
+        return out
+    with np.errstate(divide="ignore", invalid="ignore"):
+        try:
+            sigma = float(nx.sigma(sub, niter=niter, nrand=nrand, seed=seed))
+            omega = float(nx.omega(sub, niter=niter, nrand=nrand, seed=seed))
+        except ZeroDivisionError:
+            out["note"] = "a reference graph has zero clustering; sigma and omega are undefined"
+            return out
+    if not (np.isfinite(sigma) and np.isfinite(omega)):
+        out["note"] = "a reference graph has zero clustering; sigma and omega are undefined"
+        return out
+    out["sigma"], out["omega"] = sigma, omega
+    return out
+
+
 def _shift_edges(fc, name):
     pp = [(("P", int(a)), ("P", int(b)), row[2:]) for row in fc.protein_protein_shifts for a, b in [row[:2]]]
     pr = [(("R", int(r)), ("P", int(p)), row[2:]) for row in fc.protein_rna_shifts for r, p in [row[:2]]]
@@ -221,6 +314,9 @@ class GraphSeries:
         ``degree_histogram[t][d]`` is the number of nodes with degree d.
     top_degree, top_betweenness : list of list of (node, value)
         Top hubs per frame (betweenness only if requested).
+    sigma, omega : list of float
+        Small-world coefficients of the largest component per frame (only
+        if requested; see :func:`small_world`).
     """
 
     n_components: list = field(default_factory=list)
@@ -229,6 +325,8 @@ class GraphSeries:
     degree_histogram: list = field(default_factory=list)
     top_degree: list = field(default_factory=list)
     top_betweenness: list = field(default_factory=list)
+    sigma: list = field(default_factory=list)
+    omega: list = field(default_factory=list)
 
 
 @dataclass
@@ -273,7 +371,8 @@ class GraphResult:
 def graph_metrics(frames, protein_chain_of_bead, n_protein, rna_chain_of_bead, n_rna, *,
                   cutoff=DEFAULT_CUTOFF_NM, cutoff_off=None,
                   protein_protein_cutoff=None, protein_protein_cutoff_off=None,
-                  graphs=GRAPH_TYPES, top_n=5, betweenness=True) -> GraphResult:
+                  graphs=GRAPH_TYPES, top_n=5, betweenness=True,
+                  small_world_params=None) -> GraphResult:
     """Graph metrics and periodic percolation over a sequence of frames.
 
     Parameters
@@ -295,6 +394,10 @@ def graph_metrics(frames, protein_chain_of_bead, n_protein, rna_chain_of_bead, n
         Number of hubs to report per frame (default 5).
     betweenness : bool, optional
         Also rank hubs by betweenness centrality (default True; slower).
+    small_world_params : dict or None, optional
+        If given, also compute sigma and omega of each largest component per
+        frame with :func:`small_world`, using these keyword arguments
+        (``niter``, ``nrand``, ``seed``). Default None: skipped (slow).
 
     Returns
     -------
@@ -317,6 +420,10 @@ def graph_metrics(frames, protein_chain_of_bead, n_protein, rna_chain_of_bead, n
             s.degree_histogram.append(np.bincount([d for _, d in g.degree()]))
             s.top_degree.append(top_hubs(g, top_n, "degree"))
             s.top_betweenness.append(top_hubs(g, top_n, "betweenness") if betweenness else [])
+            if small_world_params is not None:
+                sw = small_world(g, nodes=comp, **small_world_params)
+                s.sigma.append(sw["sigma"])
+                s.omega.append(sw["omega"])
     return GraphResult(frame_index=np.array(index, dtype=np.int64), series=series, settings=settings)
 
 
