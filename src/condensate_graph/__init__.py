@@ -10,7 +10,16 @@ from .contacts import (
     protein_protein_contacts,
     protein_rna_contacts,
 )
-from .system import ChainSet, ChainSystem, Frame, chains_from_atoms, load_system
+from .system import (
+    ChainIdentificationWarning,
+    ChainSet,
+    ChainSystem,
+    Frame,
+    build_system,
+    chains_from_lengths,
+    chains_from_topology,
+    load_system,
+)
 
 __version__ = "0.1.0.dev0"
 
@@ -24,9 +33,12 @@ __all__ = [
     "chain_contacts",
     "protein_protein_contacts",
     "protein_rna_contacts",
+    "ChainIdentificationWarning",
     "ChainSet",
     "ChainSystem",
     "Frame",
-    "chains_from_atoms",
+    "build_system",
+    "chains_from_lengths",
+    "chains_from_topology",
     "load_system",
 ]

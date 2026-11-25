@@ -1,15 +1,19 @@
 """Load a trajectory and identify protein and RNA chains.
 
-Chains are taken from the topology (MDAnalysis segments, bonded fragments or
-molecule numbers), never by slicing the atom list into equal blocks, so
-chains of different lengths and mixed systems are handled correctly.
+Chains are identified in exactly one of three ways, chosen explicitly:
 
-MDAnalysis stores coordinates and cell lengths in angstroms; everything this
-module returns is converted to nanometres (nm).
+* ``by="segment"``: one chain per segment / chain ID in the topology;
+* ``by="fragment"``: one chain per bonded fragment (needs bonds in the topology);
+* ``chain_lengths={"protein": [...], "rna": [...]}``: explicit chain lengths in
+  beads, in file order, which must add up exactly to each selection.
+
+Nothing is guessed. MDAnalysis stores coordinates and cell lengths in
+angstroms; everything this module returns is converted to nanometres (nm).
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Iterator
 
@@ -18,9 +22,24 @@ import MDAnalysis as mda
 
 from .box import ANGSTROM_PER_NM, resolve_box, validate_box
 
-CHAIN_DEFINITIONS = ("segment", "fragment", "molnum")
+CHAIN_DEFINITIONS = ("segment", "fragment")
+SELECTION_NAMES = ("protein", "rna")
 
-__all__ = ["CHAIN_DEFINITIONS", "ChainSet", "Frame", "ChainSystem", "chains_from_atoms", "load_system"]
+__all__ = [
+    "CHAIN_DEFINITIONS",
+    "ChainIdentificationWarning",
+    "ChainSet",
+    "Frame",
+    "ChainSystem",
+    "chains_from_topology",
+    "chains_from_lengths",
+    "build_system",
+    "load_system",
+]
+
+
+class ChainIdentificationWarning(UserWarning):
+    """Warning raised when the chain identification is probably wrong."""
 
 
 @dataclass(frozen=True)
@@ -30,12 +49,13 @@ class ChainSet:
     Attributes
     ----------
     atoms : MDAnalysis.core.groups.AtomGroup
-        The atoms (beads) of this set, in topology order.
+        The atoms (beads) of this set, in file order.
     chain_of_atom : numpy.ndarray of int, shape (n_atoms,)
         Chain index (0 to ``n_chains - 1``) of each atom in ``atoms``.
     labels : tuple
-        Topology identifier of each chain (segid, fragment index or molnum),
-        in chain-index order.
+        Identifier of each chain in chain-index order: the segid for
+        ``by="segment"``, the fragment index for ``by="fragment"``, or the
+        position in the list for explicit chain lengths.
     """
 
     atoms: object
@@ -77,56 +97,121 @@ class Frame:
     rna_positions: np.ndarray
 
 
-def chains_from_atoms(atoms, by: str = "segment") -> ChainSet:
-    """Partition an AtomGroup into chains using topology information.
+def _ordered_chain_index(keys):
+    """Map per-atom keys to chain indices 0..n-1 in order of first appearance."""
+    keys = np.asarray(keys)
+    unique, first = np.unique(keys, return_index=True)
+    ordered = unique[np.argsort(first)]
+    index_of_key = {k: i for i, k in enumerate(ordered.tolist())}
+    chain_of_atom = np.fromiter((index_of_key[k] for k in keys.tolist()), dtype=np.intp, count=len(keys))
+    return chain_of_atom, ordered
+
+
+def _n_bonds(universe) -> int:
+    try:
+        return len(universe.bonds)
+    except (AttributeError, mda.exceptions.NoDataError):
+        return 0
+
+
+def chains_from_topology(atoms, by: str, name: str = "selection") -> ChainSet:
+    """Partition an AtomGroup into chains from topology information.
 
     Parameters
     ----------
     atoms : MDAnalysis.core.groups.AtomGroup
         Atoms to partition. Must not be empty.
-    by : {"segment", "fragment", "molnum"}, optional
-        How chains are defined: one chain per MDAnalysis segment (segid),
-        per bonded fragment (requires bonds in the topology), or per
-        molecule number (``molnums``, available for example from GROMACS
-        TPR files). Default ``"segment"``.
+    by : {"segment", "fragment"}
+        ``"segment"``: one chain per segment / chain ID. ``"fragment"``: one
+        chain per bonded fragment; the topology must contain bonds.
+    name : str, optional
+        Name of the selection, used in messages.
 
     Returns
     -------
     ChainSet
-        The atoms with a chain index per atom.
 
     Raises
     ------
     ValueError
-        If the group is empty, ``by`` is unknown, or the topology lacks the
-        information needed for the chosen definition.
+        If the group is empty, ``by`` is unknown, or ``by="fragment"`` is
+        used on a topology without bonds.
+
+    Warns
+    -----
+    ChainIdentificationWarning
+        If ``by="segment"`` finds a single chain in a selection that spans
+        more than one residue. Segment IDs alone cannot tell whether that is
+        one long molecule or many molecules written under one chain ID, so
+        the result is kept but flagged.
     """
     if by not in CHAIN_DEFINITIONS:
         raise ValueError(f"by must be one of {CHAIN_DEFINITIONS}, got {by!r}")
     if len(atoms) == 0:
-        raise ValueError("selection matched no atoms")
+        raise ValueError(f"{name} selection matched no atoms")
     if by == "segment":
-        keys = atoms.segindices
-        label_of = {s.segindex: s.segid for s in atoms.segments}
-    elif by == "fragment":
-        if not hasattr(atoms, "fragindices"):
-            raise ValueError("chain definition 'fragment' needs bonds in the topology")
-        try:
-            keys = atoms.fragindices
-        except mda.exceptions.NoDataError as exc:
-            raise ValueError("chain definition 'fragment' needs bonds in the topology") from exc
-        label_of = None
-    else:
-        if not hasattr(atoms, "molnums"):
-            raise ValueError("chain definition 'molnum' needs molnums in the topology (e.g. a GROMACS TPR)")
-        keys = atoms.molnums
-        label_of = None
-    unique, first = np.unique(keys, return_index=True)
-    ordered = unique[np.argsort(first)]          # chains in order of first appearance
-    index_of_key = {k: i for i, k in enumerate(ordered.tolist())}
-    chain_of_atom = np.fromiter((index_of_key[k] for k in keys.tolist()), dtype=np.intp, count=len(keys))
-    labels = tuple(label_of[k] for k in ordered.tolist()) if label_of else tuple(int(k) for k in ordered)
-    return ChainSet(atoms=atoms, chain_of_atom=chain_of_atom, labels=labels)
+        chain_of_atom, ordered = _ordered_chain_index(atoms.segindices)
+        segid_of = {s.segindex: s.segid for s in atoms.segments}
+        labels = tuple(segid_of[k] for k in ordered.tolist())
+        if len(labels) == 1 and len(atoms.residues) > 1:
+            warnings.warn(
+                f"by='segment' found only 1 chain in the {name} selection "
+                f"({len(atoms)} beads, {len(atoms.residues)} residues, segment {labels[0]!r}). "
+                "If this selection contains more than one molecule, the chains are wrong. "
+                "Use by='fragment' (needs bonds in the topology) or give explicit "
+                "chain_lengths={'protein': [...], 'rna': [...]} instead.",
+                ChainIdentificationWarning,
+                stacklevel=3,
+            )
+        return ChainSet(atoms=atoms, chain_of_atom=chain_of_atom, labels=labels)
+    if _n_bonds(atoms.universe) == 0:
+        raise ValueError(
+            "by='fragment' needs bonds in the topology, but it has none; use a topology "
+            "with bonds (e.g. PSF, TPR, LAMMPS data, PDB with CONECT records) or give "
+            "explicit chain_lengths"
+        )
+    chain_of_atom, ordered = _ordered_chain_index(atoms.fragindices)
+    return ChainSet(atoms=atoms, chain_of_atom=chain_of_atom, labels=tuple(int(k) for k in ordered))
+
+
+def chains_from_lengths(atoms, lengths, name: str = "selection") -> ChainSet:
+    """Partition an AtomGroup into consecutive chains of given lengths.
+
+    Parameters
+    ----------
+    atoms : MDAnalysis.core.groups.AtomGroup
+        Atoms to partition, in file order.
+    lengths : sequence of int
+        Number of beads in each chain, in file order. All must be positive and
+        they must add up exactly to ``len(atoms)``.
+    name : str, optional
+        Name of the selection, used in messages.
+
+    Returns
+    -------
+    ChainSet
+
+    Raises
+    ------
+    ValueError
+        If any length is not a positive integer or the lengths do not add up
+        to the number of atoms in the selection.
+    """
+    arr = np.asarray(lengths)
+    if arr.ndim != 1 or arr.size == 0:
+        raise ValueError(f"chain_lengths[{name!r}] must be a non-empty list of bead counts")
+    if not np.issubdtype(arr.dtype, np.integer):
+        raise ValueError(f"chain_lengths[{name!r}] must contain integers, got dtype {arr.dtype}")
+    if np.any(arr <= 0):
+        raise ValueError(f"chain_lengths[{name!r}] must all be positive, got {arr.tolist()}")
+    total = int(arr.sum())
+    if total != len(atoms):
+        raise ValueError(
+            f"chain_lengths[{name!r}] add up to {total} beads, but the {name} selection "
+            f"has {len(atoms)} atoms"
+        )
+    chain_of_atom = np.repeat(np.arange(arr.size, dtype=np.intp), arr)
+    return ChainSet(atoms=atoms, chain_of_atom=chain_of_atom, labels=tuple(range(arr.size)))
 
 
 @dataclass
@@ -186,27 +271,29 @@ class ChainSystem:
             )
 
 
-def load_system(topology, trajectory, protein_selection: str, rna_selection: str,
-                by: str = "segment", box=None, **universe_kwargs) -> ChainSystem:
-    """Load a trajectory and identify its protein and RNA chains.
+def build_system(universe, protein_selection: str, rna_selection: str, *,
+                 by: str | None = None, chain_lengths: dict | None = None, box=None) -> ChainSystem:
+    """Identify protein and RNA chains in an existing MDAnalysis Universe.
+
+    Exactly one of ``by`` and ``chain_lengths`` must be given.
 
     Parameters
     ----------
-    topology : str or path-like
-        Topology file readable by MDAnalysis (PDB, PSF, GRO, TPR, LAMMPS data, ...).
-    trajectory : str, path-like or list
-        Trajectory file(s) readable by MDAnalysis (DCD, XTC, LAMMPS dump, ...).
+    universe : MDAnalysis.Universe
+        Topology and trajectory.
     protein_selection : str
         MDAnalysis selection string for the protein beads, e.g. ``"name CA"``.
     rna_selection : str
         MDAnalysis selection string for the RNA beads, e.g. ``"name P S"``.
-    by : {"segment", "fragment", "molnum"}, optional
-        Chain definition passed to :func:`chains_from_atoms`. Default ``"segment"``.
+    by : {"segment", "fragment"} or None, optional
+        Identify chains from segment / chain IDs or from bonded fragments.
+    chain_lengths : dict or None, optional
+        ``{"protein": [...], "rna": [...]}``: chain lengths in beads, in file
+        order, for each selection. Each list must add up exactly to the
+        number of atoms in its selection.
     box : array_like of shape (3,) or None, optional
         Explicit orthorhombic box edge lengths in nm, for trajectories that
         store no unit cell. When None, every frame must carry a valid cell.
-    **universe_kwargs
-        Passed to :class:`MDAnalysis.Universe` (e.g. ``format="LAMMPSDUMP"``).
 
     Returns
     -------
@@ -215,24 +302,60 @@ def load_system(topology, trajectory, protein_selection: str, rna_selection: str
     Raises
     ------
     ValueError
-        If a selection is empty, the two selections overlap, or the chain
-        definition cannot be applied.
+        If neither or both of ``by`` and ``chain_lengths`` are given, a
+        selection is empty, the selections overlap, or the chain
+        identification fails (see :func:`chains_from_topology` and
+        :func:`chains_from_lengths`).
     condensate_graph.box.BoxError
         If ``box`` is given but invalid.
     """
-    u = mda.Universe(topology, trajectory, **universe_kwargs)
-    protein_atoms = u.select_atoms(protein_selection)
-    rna_atoms = u.select_atoms(rna_selection)
-    if len(protein_atoms) == 0:
-        raise ValueError(f"protein selection {protein_selection!r} matched no atoms")
-    if len(rna_atoms) == 0:
-        raise ValueError(f"RNA selection {rna_selection!r} matched no atoms")
-    overlap = protein_atoms & rna_atoms
+    if (by is None) == (chain_lengths is None):
+        raise ValueError("give exactly one of by='segment', by='fragment' or chain_lengths={...}")
+    selections = {"protein": protein_selection, "rna": rna_selection}
+    groups = {}
+    for key, sel in selections.items():
+        groups[key] = universe.select_atoms(sel)
+        if len(groups[key]) == 0:
+            raise ValueError(f"{key} selection {sel!r} matched no atoms")
+    overlap = groups["protein"] & groups["rna"]
     if len(overlap):
         raise ValueError(f"protein and RNA selections share {len(overlap)} atoms")
+
+    if chain_lengths is not None:
+        if not isinstance(chain_lengths, dict) or set(chain_lengths) != set(SELECTION_NAMES):
+            raise ValueError("chain_lengths must be a dict with exactly the keys 'protein' and 'rna'")
+        chains = {k: chains_from_lengths(groups[k], chain_lengths[k], name=k) for k in SELECTION_NAMES}
+    else:
+        chains = {k: chains_from_topology(groups[k], by, name=k) for k in SELECTION_NAMES}
     return ChainSystem(
-        universe=u,
-        protein=chains_from_atoms(protein_atoms, by=by),
-        rna=chains_from_atoms(rna_atoms, by=by),
+        universe=universe,
+        protein=chains["protein"],
+        rna=chains["rna"],
         box=None if box is None else validate_box(box),
     )
+
+
+def load_system(topology, trajectory, protein_selection: str, rna_selection: str, *,
+                by: str | None = None, chain_lengths: dict | None = None, box=None,
+                **universe_kwargs) -> ChainSystem:
+    """Load a trajectory from files and identify its protein and RNA chains.
+
+    Parameters
+    ----------
+    topology : str or path-like
+        Topology file readable by MDAnalysis (PDB, PSF, GRO, TPR, LAMMPS data, ...).
+    trajectory : str, path-like or list
+        Trajectory file(s) readable by MDAnalysis (DCD, XTC, LAMMPS dump, ...).
+    protein_selection, rna_selection : str
+        MDAnalysis selection strings for the protein and RNA beads.
+    by, chain_lengths, box
+        See :func:`build_system`. Lengths are in beads; the box is in nm.
+    **universe_kwargs
+        Passed to :class:`MDAnalysis.Universe` (e.g. ``format="LAMMPSDUMP"``).
+
+    Returns
+    -------
+    ChainSystem
+    """
+    u = mda.Universe(topology, trajectory, **universe_kwargs)
+    return build_system(u, protein_selection, rna_selection, by=by, chain_lengths=chain_lengths, box=box)
