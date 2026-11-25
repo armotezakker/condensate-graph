@@ -90,7 +90,7 @@ def test_persistence_requires_the_same_pair():
 
 def test_chain_center_z_unwraps_across_boundary():
     # beads at z = 59.8 and z = 0.4: whole chain centre at z = 0.1, not the naive 30.1
-    cz = chain_center_z([[7, 7, 59.8], [7, 7, 0.4]], [0, 0], 1, 60.0)
+    cz = chain_center_z([[7, 7, 59.8], [7, 7, 0.4]], [0, 0], 1, BOX)
     assert cz[0] == pytest.approx(0.1)
 
 

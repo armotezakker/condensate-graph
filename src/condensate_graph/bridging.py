@@ -1,9 +1,11 @@
 """RNA bridging metrics from chain-level protein-RNA contacts.
 
-All lengths (coordinates, box, cutoff, region bounds) are in nanometres (nm).
+All lengths (coordinates, box, cutoffs, region bounds) are in nanometres (nm).
 Contacts are computed with minimum-image periodic distances by
-:mod:`condensate_graph.contacts`; the same cutoff is used for protein-RNA and
-protein-protein contacts.
+:mod:`condensate_graph.contacts`. Protein-RNA contacts use ``cutoff`` (and
+``cutoff_off`` for hysteresis); protein-protein contacts use
+``protein_protein_cutoff`` (and ``protein_protein_cutoff_off``), which default
+to the protein-RNA values.
 
 Per frame and per RNA chain:
 
@@ -22,8 +24,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .box import validate_box
-from .contacts import DEFAULT_CUTOFF_NM, protein_protein_contacts, protein_rna_contacts
+from .box import unwrap_chains
+from .contacts import DEFAULT_CUTOFF_NM, ContactSettings, iter_frame_contacts
 
 MAX_VALENCY_BIN = 4
 VALENCY_LABELS = ("0", "1", "2", "3", ">=4")
@@ -105,7 +107,9 @@ def productive_bridge_flags(protein_rna_contact, protein_protein_contact) -> np.
 
     An RNA chain is a productive bridge in a frame if it contacts at least one
     pair of protein chains that are not in direct contact with each other in
-    that frame (same cutoff for both kinds of contact).
+    that frame, where protein-RNA contact uses ``cutoff`` and direct
+    protein-protein contact uses ``protein_protein_cutoff`` (equal to
+    ``cutoff`` unless set separately; hysteresis applies if enabled).
 
     Parameters
     ----------
@@ -113,7 +117,7 @@ def productive_bridge_flags(protein_rna_contact, protein_protein_contact) -> np.
         Chain-level protein-RNA contacts for one frame.
     protein_protein_contact : array_like of bool, shape (n_protein, n_protein)
         Symmetric chain-level protein-protein contacts for the same frame,
-        with a False diagonal.
+        computed with the protein-protein cutoff, with a False diagonal.
 
     Returns
     -------
@@ -146,14 +150,15 @@ def persistent_bridge_flags(contact_window) -> np.ndarray:
     return window.all(axis=0).sum(axis=1) >= 2
 
 
-def chain_center_z(positions, chain_of_bead, n_chains, box_z, masses=None) -> np.ndarray:
+def chain_center_z(positions, chain_of_bead, n_chains, box, masses=None) -> np.ndarray:
     """Periodic-aware z coordinate of each chain's centre, in nm.
 
-    Each chain is made whole along z by unwrapping every bead relative to the
-    previous bead of the same chain (in file order), then the (mass-weighted)
-    mean z is wrapped back into ``[0, box_z)``. This assumes consecutive beads
-    of a chain are closer than ``box_z / 2`` along z, which holds for bonded
-    beads.
+    Each chain is made whole with :func:`condensate_graph.box.unwrap_chains`
+    (every bead placed at the minimum-image position relative to the
+    previous bead of the same chain, in file order), then the
+    (mass-weighted) mean z is wrapped back into ``[0, Lz)``. This assumes
+    consecutive beads of a chain are closer than half the box length, which
+    holds for bonded beads.
 
     Parameters
     ----------
@@ -163,8 +168,8 @@ def chain_center_z(positions, chain_of_bead, n_chains, box_z, masses=None) -> np
         Chain index of each bead.
     n_chains : int
         Number of chains.
-    box_z : float
-        Box length along z in nm.
+    box : array_like, shape (3,)
+        Box edge lengths in nm.
     masses : array_like, shape (n_beads,), optional
         Bead masses (any unit) for a centre of mass. Default: equal weights
         (centre of geometry).
@@ -172,28 +177,17 @@ def chain_center_z(positions, chain_of_bead, n_chains, box_z, masses=None) -> np
     Returns
     -------
     numpy.ndarray, shape (n_chains,)
-        Centre z of each chain in nm, in ``[0, box_z)``; NaN for a chain
-        with no beads.
+        Centre z of each chain in nm, in ``[0, Lz)``; NaN for a chain with no
+        beads.
     """
-    z = np.asarray(positions, dtype=np.float64)[:, 2]
     ch = np.asarray(chain_of_bead, dtype=np.intp)
-    w = np.ones_like(z) if masses is None else np.asarray(masses, dtype=np.float64)
-    order = np.argsort(ch, kind="stable")          # group beads by chain, keep file order inside
-    z, ch, w = z[order], ch[order], w[order]
-    dz = np.diff(z)
-    dz -= box_z * np.round(dz / box_z)
-    same = ch[1:] == ch[:-1]
-    step = np.concatenate(([0.0], np.where(same, dz, 0.0)))
-    cum = np.cumsum(step)
-    starts = np.concatenate(([True], ~same))
-    group_start_cum = np.maximum.accumulate(np.where(starts, np.arange(len(z)), 0))
-    first_z = z[group_start_cum]
-    unwrapped = first_z + cum - cum[group_start_cum]
+    whole = unwrap_chains(positions, ch, box)
+    w = np.ones(len(ch)) if masses is None else np.asarray(masses, dtype=np.float64)
     wsum = np.bincount(ch, weights=w, minlength=n_chains)
-    zsum = np.bincount(ch, weights=w * unwrapped, minlength=n_chains)
+    zsum = np.bincount(ch, weights=w * whole[:, 2], minlength=n_chains)
     with np.errstate(invalid="ignore", divide="ignore"):
         centre = zsum / wsum
-    return np.mod(centre, box_z)
+    return np.mod(centre, float(np.asarray(box)[2]))
 
 
 def region_mask(center_z, region, box_z) -> np.ndarray:
@@ -257,8 +251,8 @@ class BridgingResult:
     persistent_flags : dict[int, numpy.ndarray]
         For each ``k``, per-frame per-RNA persistent-bridge flags,
         shape (n_frames, n_rna); False in the first ``k - 1`` frames.
-    cutoff : float
-        Contact cutoff in nm.
+    settings : condensate_graph.contacts.ContactSettings
+        Protein-RNA and protein-protein cutoffs and release distances in nm.
     region : tuple or None
         ``(zmin, zmax)`` in nm, or None.
     """
@@ -272,7 +266,7 @@ class BridgingResult:
     f_bridge_productive: np.ndarray
     f_bridge_persistent: dict = field(default_factory=dict)
     persistent_flags: dict = field(default_factory=dict)
-    cutoff: float = DEFAULT_CUTOFF_NM
+    settings: ContactSettings | None = None
     region: tuple | None = None
 
     @property
@@ -318,7 +312,9 @@ def _as_min_frames(min_frames):
 
 
 def bridging_metrics(frames, protein_chain_of_bead, n_protein, rna_chain_of_bead, n_rna, *,
-                     cutoff=DEFAULT_CUTOFF_NM, region=None, min_frames=(1,), rna_masses=None) -> BridgingResult:
+                     cutoff=DEFAULT_CUTOFF_NM, cutoff_off=None,
+                     protein_protein_cutoff=None, protein_protein_cutoff_off=None,
+                     region=None, min_frames=(1,), rna_masses=None) -> BridgingResult:
     """Compute bridging metrics over a sequence of frames.
 
     Parameters
@@ -336,8 +332,17 @@ def bridging_metrics(frames, protein_chain_of_bead, n_protein, rna_chain_of_bead
     n_rna : int
         Number of RNA chains.
     cutoff : float, optional
-        Contact cutoff in nm (default 1.5 nm), used for both protein-RNA
-        and protein-protein contacts.
+        Protein-RNA contact cutoff in nm (default 1.5 nm).
+    cutoff_off : float or None, optional
+        Hysteresis release distance in nm (> ``cutoff``): a protein-RNA chain
+        contact switches on within ``cutoff`` and stays on until the minimum
+        bead distance exceeds ``cutoff_off``. Default None: plain cutoff.
+    protein_protein_cutoff : float or None, optional
+        Cutoff in nm for direct protein-protein contacts, used by the
+        productive bridge. Default: same as ``cutoff``.
+    protein_protein_cutoff_off : float or None, optional
+        Release distance in nm for protein-protein contacts. Default:
+        ``cutoff_off`` if ``protein_protein_cutoff`` is not given, else None.
     region : tuple of float or None, optional
         ``(zmin, zmax)`` in nm. If given, only RNA chains whose periodic-aware
         centre z (see :func:`chain_center_z`) lies in this range are counted
@@ -345,7 +350,8 @@ def bridging_metrics(frames, protein_chain_of_bead, n_protein, rna_chain_of_bead
         detection is done.
     min_frames : int or sequence of int, optional
         Window lengths ``k`` for the persistent bridge (default ``(1,)``;
-        ``k = 1`` equals the basic bridge). Persistence assumes the frames
+        ``k = 1`` equals the basic bridge). Hysteresis, if enabled, is
+        applied to the contacts before persistence. Persistence assumes the frames
         are consecutive and equally spaced in time, so a window of ``k``
         frames spans ``k`` times the spacing of the analysed frames (the
         trajectory saving interval multiplied by any step used when
@@ -359,26 +365,34 @@ def bridging_metrics(frames, protein_chain_of_bead, n_protein, rna_chain_of_bead
     BridgingResult
     """
     ks = _as_min_frames(min_frames)
+    settings = ContactSettings.create(cutoff, cutoff_off, protein_protein_cutoff, protein_protein_cutoff_off)
+    current = {}
+
+    def _tap(iterable):  # keep a handle on the frame whose contacts are being yielded
+        for fr in iterable:
+            current["frame"] = fr
+            yield fr
+
     k_max = ks[-1]
     history = deque(maxlen=k_max)
     rows = {key: [] for key in ("index", "counted", "pn", "B", "basic", "productive")}
     persistent = {k: [] for k in ks}
     flags_by_k = {k: [] for k in ks}
 
-    for t, f in enumerate(frames):
-        box = validate_box(f.box)
-        pr = protein_rna_contacts(f.protein_positions, protein_chain_of_bead, n_protein,
-                                  f.rna_positions, rna_chain_of_bead, n_rna, box, cutoff)
-        pp = protein_protein_contacts(f.protein_positions, protein_chain_of_bead, n_protein, box, cutoff)
+    contacts = iter_frame_contacts(_tap(frames), protein_chain_of_bead, n_protein, rna_chain_of_bead, n_rna,
+                                   settings)
+    for t, fc in enumerate(contacts):
+        pr, pp = fc.protein_rna, fc.protein_protein
         if region is None:
             counted = np.ones(n_rna, dtype=bool)
         else:
-            cz = chain_center_z(f.rna_positions, rna_chain_of_bead, n_rna, box[2], rna_masses)
-            counted = region_mask(cz, region, box[2])
+            f = current["frame"]
+            cz = chain_center_z(f.rna_positions, rna_chain_of_bead, n_rna, fc.box, rna_masses)
+            counted = region_mask(cz, region, fc.box[2])
         val = valency(pr)
         history.append(pr)
 
-        rows["index"].append(int(getattr(f, "index", t)))
+        rows["index"].append(fc.index)
         rows["counted"].append(counted)
         rows["pn"].append(valency_distribution(val, counted))
         rows["B"].append(float(val[counted].mean()) if counted.any() else float("nan"))
@@ -404,7 +418,7 @@ def bridging_metrics(frames, protein_chain_of_bead, n_protein, rna_chain_of_bead
         f_bridge_productive=np.array(rows["productive"], dtype=np.float64),
         f_bridge_persistent={k: np.array(v, dtype=np.float64) for k, v in persistent.items()},
         persistent_flags={k: np.array(v, dtype=bool).reshape(n_frames, n_rna) for k, v in flags_by_k.items()},
-        cutoff=float(cutoff),
+        settings=settings,
         region=None if region is None else (float(region[0]), float(region[1])),
     )
 
@@ -420,8 +434,9 @@ def run_bridging(system, start=None, stop=None, step=None, **kwargs) -> Bridging
         Frame slice over the trajectory. With ``step > 1`` the persistence
         window spans ``k * step`` saved frames.
     **kwargs
-        ``cutoff`` (nm), ``region`` (nm), ``min_frames`` and ``rna_masses``,
-        passed to :func:`bridging_metrics`.
+        ``cutoff``, ``cutoff_off``, ``protein_protein_cutoff``,
+        ``protein_protein_cutoff_off`` and ``region`` (all nm), ``min_frames``
+        and ``rna_masses``, passed to :func:`bridging_metrics`.
 
     Returns
     -------

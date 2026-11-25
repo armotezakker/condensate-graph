@@ -3,10 +3,13 @@
 All lengths in the public API are in nanometres (nm).
 """
 
-from .box import BoxError, box_from_dimensions, resolve_box, validate_box, wrap_positions
+from .box import BoxError, box_from_dimensions, resolve_box, unwrap_chains, validate_box, wrap_positions
 from .bridging import BridgingResult, bridging_metrics, run_bridging
 from .contacts import (
     DEFAULT_CUTOFF_NM,
+    ContactSettings,
+    FrameContacts,
+    iter_frame_contacts,
     chain_contacts,
     protein_protein_contacts,
     protein_rna_contacts,
@@ -33,6 +36,10 @@ __all__ = [
     "resolve_box",
     "validate_box",
     "wrap_positions",
+    "unwrap_chains",
+    "ContactSettings",
+    "FrameContacts",
+    "iter_frame_contacts",
     "DEFAULT_CUTOFF_NM",
     "chain_contacts",
     "protein_protein_contacts",

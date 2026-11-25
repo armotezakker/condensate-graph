@@ -17,7 +17,7 @@ import numpy as np
 ANGSTROM_PER_NM = 10.0
 _ANGLE_TOLERANCE_DEG = 1e-3
 
-__all__ = ["BoxError", "validate_box", "box_from_dimensions", "resolve_box", "wrap_positions"]
+__all__ = ["BoxError", "validate_box", "box_from_dimensions", "resolve_box", "wrap_positions", "unwrap_chains"]
 
 
 class BoxError(ValueError):
@@ -161,3 +161,55 @@ def wrap_positions(positions, box) -> np.ndarray:
     # np.mod can return exactly L for tiny negative inputs after rounding
     wrapped[wrapped >= L] = 0.0
     return wrapped
+
+
+def unwrap_chains(positions, chain_of_bead, box) -> np.ndarray:
+    """Make every chain whole across the periodic boundaries.
+
+    The first bead of each chain (in file order) is the chain's reference and
+    keeps its given position. Every following bead of the same chain is
+    placed at the minimum-image position relative to the previous bead. This
+    is exact as long as consecutive beads of a chain are closer than half the
+    box length along each axis, which holds for bonded beads.
+
+    Parameters
+    ----------
+    positions : array_like, shape (n_beads, 3)
+        Coordinates in nm, wrapped or not.
+    chain_of_bead : array_like of int, shape (n_beads,)
+        Chain index of each bead. Beads of a chain need not be contiguous in
+        the array; their relative file order is kept.
+    box : array_like, shape (3,)
+        Box edge lengths in nm.
+
+    Returns
+    -------
+    numpy.ndarray, shape (n_beads, 3), float64
+        Coordinates in nm with each chain whole (not wrapped into the cell).
+
+    Raises
+    ------
+    BoxError
+        If the box is invalid.
+    ValueError
+        If the shapes do not match.
+    """
+    L = validate_box(box)
+    pos = np.asarray(positions, dtype=np.float64)
+    ch = np.asarray(chain_of_bead, dtype=np.intp)
+    if pos.ndim != 2 or pos.shape[1] != 3 or ch.shape != (len(pos),):
+        raise ValueError("positions must have shape (n, 3) and chain_of_bead shape (n,)")
+    if len(pos) == 0:
+        return pos.copy()
+    order = np.argsort(ch, kind="stable")      # group by chain, keep file order inside each chain
+    p, c = pos[order], ch[order]
+    d = np.diff(p, axis=0)
+    d -= L * np.round(d / L)
+    same = c[1:] == c[:-1]
+    step = np.vstack([np.zeros((1, 3)), np.where(same[:, None], d, 0.0)])
+    cum = np.cumsum(step, axis=0)
+    starts = np.concatenate(([True], ~same))
+    first = np.maximum.accumulate(np.where(starts, np.arange(len(p)), 0))
+    out = np.empty_like(pos)
+    out[order] = p[first] + cum - cum[first]
+    return out
