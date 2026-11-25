@@ -92,6 +92,7 @@ def test_erdos_renyi_reference_is_seed_reproducible():
     assert a["reference"] == "erdos_renyi"
 
 
+@pytest.mark.slow
 def test_large_erdos_renyi_graph_has_sigma_near_one_in_erdos_renyi_mode():
     er = nx.gnm_random_graph(500, 2500, seed=5)  # mean degree 10, connected
     assert nx.is_connected(er)

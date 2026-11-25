@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using these metadata."
+title: "condensate-graph: chain-level contact networks for protein-RNA condensate simulations"
+type: software
+authors:
+  - family-names: Motezakker
+    given-names: Ahmad Reza
+    affiliation: KTH Royal Institute of Technology
+version: 0.1.0
+license: MIT
+repository-code: "https://github.com/armotezakker/condensate-graph"
+keywords:
+  - biomolecular condensates
+  - protein-RNA
+  - coarse-grained molecular dynamics
+  - contact networks
+  - percolation
