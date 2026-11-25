@@ -4,6 +4,7 @@ All lengths in the public API are in nanometres (nm).
 """
 
 from .box import BoxError, box_from_dimensions, resolve_box, validate_box, wrap_positions
+from .bridging import BridgingResult, bridging_metrics, run_bridging
 from .contacts import (
     DEFAULT_CUTOFF_NM,
     chain_contacts,
@@ -24,6 +25,9 @@ from .system import (
 __version__ = "0.1.0.dev0"
 
 __all__ = [
+    "BridgingResult",
+    "bridging_metrics",
+    "run_bridging",
     "BoxError",
     "box_from_dimensions",
     "resolve_box",
