@@ -78,3 +78,49 @@ def test_graph_metrics_reports_small_world_when_requested():
     assert r.series["pp"].omega[0] < SMALL_WORLD_WINDOW[0]  # lattice-like
     r = graph_metrics([f], np.arange(40), 40, np.empty(0, int), 0, graphs=("pp",), betweenness=False)
     assert r.series["pp"].sigma == []
+
+
+# ---------------------------------------------------------------- Erdos-Renyi reference for sigma
+
+def test_erdos_renyi_reference_is_seed_reproducible():
+    ws = nx.connected_watts_strogatz_graph(100, 6, 0.1, seed=2)
+    a = small_world(ws, niter=2, nrand=4, seed=11, reference="erdos_renyi")
+    b = small_world(ws, niter=2, nrand=4, seed=11, reference="erdos_renyi")
+    c = small_world(ws, niter=2, nrand=4, seed=12, reference="erdos_renyi")
+    assert a == b
+    assert a["sigma"] != c["sigma"]
+    assert a["reference"] == "erdos_renyi"
+
+
+def test_large_erdos_renyi_graph_has_sigma_near_one_in_erdos_renyi_mode():
+    er = nx.gnm_random_graph(500, 2500, seed=5)  # mean degree 10, connected
+    assert nx.is_connected(er)
+    sw = small_world(er, niter=1, nrand=10, seed=3, reference="erdos_renyi")
+    assert sw["sigma"] == pytest.approx(1.0, abs=0.15)
+    assert sw["n_disconnected_references"] == 0 and sw["note"] == ""
+
+
+def test_erdos_renyi_mode_changes_sigma_only():
+    ws = nx.connected_watts_strogatz_graph(120, 6, 0.1, seed=4)
+    dp = small_world(ws, niter=2, nrand=3, seed=9)
+    er = small_world(ws, niter=2, nrand=3, seed=9, reference="erdos_renyi")
+    assert er["omega"] == dp["omega"]
+    assert er["sigma"] != dp["sigma"] and er["sigma"] > 1.5
+
+
+def test_disconnected_erdos_renyi_references_are_counted_in_note():
+    # ring of 40 triangles sharing corners: 80 nodes, 120 edges, mean degree 3,
+    # so G(n, m) samples with the same n and m are almost always disconnected
+    g = nx.Graph()
+    for k in range(40):
+        a, b, c = 2 * k, 2 * k + 1, (2 * k + 2) % 80
+        g.add_edges_from([(a, b), (b, c), (a, c)])
+    sw = small_world(g, niter=1, nrand=10, seed=0, reference="erdos_renyi")
+    assert sw["n_disconnected_references"] > 0
+    assert f"{sw['n_disconnected_references']} of 10 Erdos-Renyi references were disconnected" in sw["note"]
+    assert math.isfinite(sw["sigma"])
+
+
+def test_unknown_reference_raises():
+    with pytest.raises(ValueError, match="reference must be one of"):
+        small_world(nx.cycle_graph(5), reference="lattice")

@@ -28,6 +28,7 @@ GRAPH_TYPES = ("pp", "bridged", "combined", "bipartite")
 AXES = ("x", "y", "z")
 SMALL_WORLD_WINDOW = (-0.3, 0.3)  # omega range commonly called small-world
 _MIN_SMALL_WORLD_NODES = 4        # networkx reference graphs need at least 4 nodes
+SMALL_WORLD_REFERENCES = ("degree_preserving", "erdos_renyi")
 
 __all__ = [
     "GRAPH_TYPES",
@@ -39,6 +40,7 @@ __all__ = [
     "top_hubs",
     "spanning_axes",
     "small_world",
+    "SMALL_WORLD_REFERENCES",
     "SMALL_WORLD_WINDOW",
     "graph_metrics",
     "run_graph_metrics",
@@ -197,11 +199,11 @@ def spanning_axes(edges, start) -> np.ndarray:
 
 # --------------------------------------------------------------------------- small-world
 
-def small_world(graph, niter=5, nrand=10, seed=0, nodes=None) -> dict:
+def small_world(graph, niter=5, nrand=10, seed=0, nodes=None, reference="degree_preserving") -> dict:
     """Small-world coefficients sigma and omega of one connected component.
 
-    Both compare the component with reference graphs that have the same
-    number of nodes and the same degree of every node:
+    Both compare the component with random reference graphs. By default
+    these have the same number of nodes and the same degree of every node:
 
     * sigma = (C / C_rand) / (L / L_rand), where C is the average clustering
       coefficient (how often a node's neighbours are also linked to each
@@ -216,10 +218,26 @@ def small_world(graph, niter=5, nrand=10, seed=0, nodes=None) -> dict:
       a random graph. The range -0.3 <= omega <= 0.3
       (:data:`SMALL_WORLD_WINDOW`) is commonly called small-world.
 
+    The ``reference`` option changes the random reference for sigma only:
+
+    * ``"degree_preserving"`` (default): C_rand and L_rand come from
+      :func:`networkx.sigma`, which rewires the component while keeping every
+      node's degree.
+    * ``"erdos_renyi"``: C_rand and L_rand are averaged over ``nrand``
+      Erdos-Renyi G(n, m) random graphs with the same number of nodes n and
+      edges m as the component. Degrees are not kept, so random graphs of
+      this kind usually cluster less and sigma comes out larger. A G(n, m)
+      sample can be disconnected; then L_rand of that sample is taken from
+      its largest component, and how often this happened is stated in
+      ``note`` and returned as ``n_disconnected_references``. ``niter`` is
+      not used for sigma in this mode.
+
+    omega always uses the references of :func:`networkx.omega` (degree
+    preserving random graphs and the lattice-like reference), in both modes.
+
     Both values are stochastic: they depend on the random reference graphs,
-    which are drawn with :func:`networkx.sigma` and :func:`networkx.omega`
-    from the given ``seed``. The same seed gives the same result; repeat with
-    several seeds to see the spread.
+    which are drawn from the given ``seed``. The same seed gives the same
+    result; repeat with several seeds to see the spread.
 
     Parameters
     ----------
@@ -236,12 +254,16 @@ def small_world(graph, niter=5, nrand=10, seed=0, nodes=None) -> dict:
         component by number of nodes; for graphs from :func:`build_graphs`
         pass ``largest_protein_component(graph)`` to follow the package's
         largest-component definition.
+    reference : {"degree_preserving", "erdos_renyi"}, optional
+        Random reference used for sigma (default ``"degree_preserving"``).
 
     Returns
     -------
     dict
         ``sigma``, ``omega``, ``n_nodes`` and ``n_edges`` of the analysed
-        component, plus ``niter``, ``nrand``, ``seed`` and ``note``.
+        component, plus ``niter``, ``nrand``, ``seed``, ``reference``,
+        ``n_disconnected_references`` (Erdos-Renyi mode only, else 0) and
+        ``note``.
         ``sigma`` and ``omega`` are NaN, with the reason in ``note``, when
         they are not defined: fewer than 4 nodes, a complete graph, or zero
         clustering in the component or in its reference graphs (for example
@@ -250,8 +272,11 @@ def small_world(graph, niter=5, nrand=10, seed=0, nodes=None) -> dict:
     Raises
     ------
     ValueError
-        If ``nodes`` do not form a connected subgraph.
+        If ``nodes`` do not form a connected subgraph, or ``reference`` is
+        not one of the two options.
     """
+    if reference not in SMALL_WORLD_REFERENCES:
+        raise ValueError(f"reference must be one of {SMALL_WORLD_REFERENCES}, got {reference!r}")
     if nodes is None:
         comps = list(nx.connected_components(graph))
         nodes = max(comps, key=len) if comps else set()
@@ -260,7 +285,8 @@ def small_world(graph, niter=5, nrand=10, seed=0, nodes=None) -> dict:
         raise ValueError("small_world needs a connected set of nodes")
     n, m = sub.number_of_nodes(), sub.number_of_edges()
     out = {"sigma": float("nan"), "omega": float("nan"), "n_nodes": n, "n_edges": m,
-           "niter": int(niter), "nrand": int(nrand), "seed": int(seed), "note": ""}
+           "niter": int(niter), "nrand": int(nrand), "seed": int(seed),
+           "reference": reference, "n_disconnected_references": 0, "note": ""}
     if n < _MIN_SMALL_WORLD_NODES:
         out["note"] = f"component has {n} nodes; at least {_MIN_SMALL_WORLD_NODES} are needed"
         return out
@@ -272,7 +298,11 @@ def small_world(graph, niter=5, nrand=10, seed=0, nodes=None) -> dict:
         return out
     with np.errstate(divide="ignore", invalid="ignore"):
         try:
-            sigma = float(nx.sigma(sub, niter=niter, nrand=nrand, seed=seed))
+            if reference == "erdos_renyi":
+                sigma, n_split = _sigma_erdos_renyi(sub, nrand, seed)
+                out["n_disconnected_references"] = n_split
+            else:
+                sigma = float(nx.sigma(sub, niter=niter, nrand=nrand, seed=seed))
             omega = float(nx.omega(sub, niter=niter, nrand=nrand, seed=seed))
         except ZeroDivisionError:
             out["note"] = "a reference graph has zero clustering; sigma and omega are undefined"
@@ -281,7 +311,26 @@ def small_world(graph, niter=5, nrand=10, seed=0, nodes=None) -> dict:
         out["note"] = "a reference graph has zero clustering; sigma and omega are undefined"
         return out
     out["sigma"], out["omega"] = sigma, omega
+    if out["n_disconnected_references"]:
+        out["note"] = (f"{out['n_disconnected_references']} of {int(nrand)} Erdos-Renyi references were "
+                       "disconnected; their largest component was used for L_rand")
     return out
+
+
+def _sigma_erdos_renyi(sub, nrand, seed):
+    """sigma against G(n, m) references; returns (sigma, number of disconnected samples)."""
+    n, m = sub.number_of_nodes(), sub.number_of_edges()
+    rng = np.random.default_rng(seed)
+    c_rand, l_rand, n_split = [], [], 0
+    for sample_seed in rng.integers(0, 2**32 - 1, size=int(nrand)):
+        ref = nx.gnm_random_graph(n, m, seed=int(sample_seed))
+        c_rand.append(nx.average_clustering(ref))
+        if not nx.is_connected(ref):
+            n_split += 1
+            ref = ref.subgraph(max(nx.connected_components(ref), key=len))
+        l_rand.append(nx.average_shortest_path_length(ref) if ref.number_of_nodes() > 1 else np.nan)
+    c, l_ = nx.average_clustering(sub), nx.average_shortest_path_length(sub)
+    return float((c / np.mean(c_rand)) / (l_ / np.mean(l_rand))), n_split
 
 
 def _shift_edges(fc, name):
