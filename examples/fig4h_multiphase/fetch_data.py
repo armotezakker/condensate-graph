@@ -9,6 +9,7 @@ Two sources, both fetched at run time and never stored in this repository:
 
 Usage:
     python fetch_data.py [--yes] [--cache DIR]
+    python fetch_data.py --clean [--yes]     # remove the downloaded files
 """
 import argparse
 import hashlib
@@ -118,11 +119,41 @@ def fetch_profiles(cache, assume_yes):
         download(url, cache / f"published_{s}.npy")
 
 
+def cache_files(cache):
+    """Every file this script may create in the cache folder."""
+    names = [ZIP_NAME, ZIP_NAME + ".part", *MEMBERS.values()]
+    names += [f"published_{s}.npy" for s in PROFILE_SPECIES] + [f"published_{s}.npy.part" for s in PROFILE_SPECIES]
+    return [cache / n for n in names]
+
+
+def clean(cache, assume_yes):
+    """Delete the files this script created, then the cache folder if it is empty."""
+    present = [f for f in cache_files(cache) if f.exists()]
+    if not present:
+        print(f"nothing to remove in {cache}")
+        return
+    size = sum(f.stat().st_size for f in present)
+    if not confirm(f"Remove {len(present)} files ({size / 1e9:.3f} GB) from {cache}?", assume_yes):
+        sys.exit("nothing removed")
+    for f in present:
+        f.unlink()
+        print(f"removed {f}")
+    try:
+        cache.rmdir()
+        print(f"removed empty folder {cache}")
+    except OSError:
+        print(f"kept {cache}: it still contains files this script did not create")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--yes", action="store_true", help="download without asking")
+    ap.add_argument("--yes", action="store_true", help="do not ask before downloading or removing")
+    ap.add_argument("--clean", action="store_true", help="remove the downloaded files from the cache and exit")
     ap.add_argument("--cache", type=Path, default=DEFAULT_CACHE, help=f"cache folder (default {DEFAULT_CACHE})")
     args = ap.parse_args()
+    if args.clean:
+        clean(args.cache, args.yes)
+        return
     args.cache.mkdir(parents=True, exist_ok=True)
     fetch_trajectory(args.cache, args.yes)
     fetch_profiles(args.cache, args.yes)

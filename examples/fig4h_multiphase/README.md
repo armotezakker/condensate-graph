@@ -45,6 +45,7 @@ Please cite the article and the Zenodo record if you use these data.
 python fetch_data.py          # asks before downloading 0.832 GB; --yes skips the question
 python run_analysis.py        # writes output/results.json and output/per_frame.npz
 python make_figures.py        # writes four PNG files to output/
+python fetch_data.py --clean  # optional: delete the downloaded files (about 1.8 GB) again
 ```
 
 Measured on a 112-core workstation, CPU only:
@@ -52,7 +53,7 @@ Measured on a 112-core workstation, CPU only:
 | step | time |
 |---|---|
 | `fetch_data.py` (download, md5 check, extraction) | 1 min 55 s |
-| `run_analysis.py --workers 48` (1345 frames) | 26 min (1562 s) |
+| `run_analysis.py --workers 48` (all 1445 frames) | 28 min (1662 s) |
 | `make_figures.py` | 2 s |
 
 Most of the analysis time goes into exact betweenness centrality for every
@@ -66,8 +67,24 @@ the run time grows roughly in proportion.
   labelled RGG3 or PLP from their length (34 or 173 beads). The PDB in the
   Zenodo record lacks many CONECT records, so `by="fragment"` would split the
   protein chains into 6698 pieces; the package warns about this.
-- **Frames.** Frames 100 onward are analysed, as in the paper's analysis
-  scripts.
+- **Frames.** Every stored frame is analysed. The deposited DCD appears to
+  be the paper's processed trajectory: the droplet is already centred in
+  every frame, and density profiles from all stored frames reproduce the
+  published ones exactly (below). The paper's own analysis dropped the first
+  100 frames of the raw run before writing this file, so they are not
+  dropped again here.
+- **Plateau window.** Network metrics are reported on the window where the
+  droplet has stopped growing. Rule: take a centred rolling mean over 50
+  frames of the largest-component fraction of the combined graph; take the
+  final value as the mean of the last 10% of frames; the window starts at
+  the first frame where the rolling mean reaches 95% of the final value and
+  runs to the end. Here it starts at frame 349 (3.49 µs) and covers 1096
+  frames; the rolling mean falls below the threshold again in only 0.5% of
+  them. The start moves by less than 30 frames (frames 334 to 364) when the
+  rolling window is 100 frames, the final value is taken from the last 20%
+  or 50%, or the tolerance is 10%. A stricter rule, that the rolling mean
+  never falls below the threshold again, would start at frame 1398 because
+  of one short dip; it is reported in `results.json` but not used.
 - **Frame spacing.** Not stated in the data files. **10 ns per frame is
   assumed** (the paper's condensate runs were written every 10 ns). All times
   in the output depend on this assumption.
@@ -78,56 +95,60 @@ the run time grows roughly in proportion.
   graph, on every 10th analysed frame (135 frames), niter 5, nrand 10, seed 0,
   degree-preserving references.
 
-## Results (frames 100 to 1444)
+## Results
 
-**Density profiles (sanity check, figure d).** Radial density profiles of
-RGG3, PLP and RNA around the droplet centre, 1 nm shells, in mM of chains. I
-re-implemented the paper's approach: move the densest 0.1 nm bin along z, y
-and x to the box centre, wrap, then histogram distances from the centre.
-Agreement with the published curves for r up to 50 nm:
+**Density profiles (sanity check, figure d), all 1445 stored frames.**
+Radial density profiles of RGG3, PLP and RNA around the box centre, 1 nm
+shells, in mM of chains, against the published curves (r up to 50 nm):
 
 | variant | RGG3 | PLP | RNA |
 |---|---|---|---|
-| re-centred, frames 100+ (main analysis): relative RMS / core ratio | 0.063 / 1.03 | 0.064 / 0.99 | 0.098 / 1.04 |
-| coordinates as stored, all 1445 frames: relative RMS / core ratio | 0.000 / 1.000 | 0.000 / 1.000 | 0.000 / 1.000 |
+| coordinates as stored: max absolute difference | 0.003 mM | 0.0001 mM | 0.0005 mM |
+| coordinates as stored: relative RMS / core ratio | 0.000 / 1.000 | 0.000 / 1.000 | 0.000 / 1.000 |
+| centred again: relative RMS / core ratio | 0.036 / 0.996 | 0.020 / 0.993 | 0.061 / 1.013 |
 
-"Core ratio" is our mean concentration for r < 10 nm divided by the published
-one; Pearson r is 0.999 or 1.000 in every case. The second row reproduces the
-published profiles exactly. This shows that the Zenodo trajectory is the
-paper's processed trajectory: the droplet is already centred in every frame,
-and the paper's first 100 frames are probably already removed. Dropping
-another 100 frames, as the main analysis does, therefore discards about 1 µs
-more than the paper did; the profiles still agree to within 10%.
+"Core ratio" is our mean concentration for r < 10 nm divided by the
+published one. With the coordinates as stored, the profiles match the
+published ones to the precision of the stored single-precision coordinates.
+"Centred again" applies the paper's centring (move the densest 0.1 nm bin
+along z, y and x to the box centre) a second time, re-implemented here; it
+moves the droplet by a few nm per frame and blurs the profiles slightly.
+
+The network results below are for the plateau window, frames 349 to 1444
+(3.49 to 14.44 µs at the assumed 10 ns per frame). `results.json` also has
+every number for all frames.
 
 **Bridging (figure a).**
 
 | | no hysteresis | hysteresis (off at 2.0 nm) |
 |---|---|---|
-| mean RNA valency B (protein chains contacted) | 13.8 | 14.2 |
-| P(n ≥ 4) | 0.71 | 0.71 |
-| f_bridge basic (≥ 2 protein chains) | 0.925 | 0.925 |
-| f_bridge productive (bridges proteins not in direct contact) | 0.784 | 0.779 |
-| persistent, k = 2 | 0.529 | 0.606 |
-| persistent, k = 5 | 0.0024 | 0.0026 |
+| mean RNA valency B (protein chains contacted) | 14.05 | 14.48 |
+| P(n ≥ 4) | 0.711 | 0.712 |
+| f_bridge basic (≥ 2 protein chains) | 0.924 | 0.924 |
+| f_bridge productive (bridges proteins not in direct contact) | 0.783 | 0.778 |
+| persistent, k = 2 | 0.527 | 0.605 |
+| persistent, k = 5 | 0.0025 | 0.0026 |
+
+Over all frames the bridging numbers differ by less than 0.01 (B 13.68
+without hysteresis), so they hardly depend on the growth phase.
 
 **Graphs and percolation (figure b).** No graph percolates in any frame, as
-expected for a finite droplet in a large box. The largest component holds 56%
-of the protein chains on average. It grows from about 27% to 60% during the
-first 2.5 µs after frame 100 (mean 0.39 for frames 100 to 349, 0.60 for
-frames 350 onward), so the droplet is still coarsening at the start of the
-analysed window. The bridging fractions hardly change between those two
-periods.
+expected for a finite droplet in a large box. In the window the largest
+component holds 60% of the protein chains (pp 0.600, bridged 0.598,
+combined 0.602, bipartite 0.598); over all frames it is 54%, because it
+grows from about 30% during the first 3.5 µs.
 
-**Hubs (figure c).** In the bridged and combined graphs, RGG3 chains have more
-than twice the degree of PLP chains (about 40 vs 17), which fits an RNA-RGG3
-core. PLP chains have the highest betweenness in every protein-only graph and
-fill 7 to 9 of the top 10 betweenness positions per frame. In the bipartite
-graph, RNA chains are the hubs by degree (all top 10) and mostly by betweenness
-(8 of 10).
+**Hubs (figure c).** In the bridged and combined graphs, RGG3 chains have
+more than twice the degree of PLP chains (41 vs 18), which fits an RNA-RGG3
+core. PLP chains have the highest betweenness in every protein-only graph:
+they fill 9.1 (pp), 7.6 (bridged) and 7.8 (combined) of the top 10
+betweenness positions per frame on average. In the bipartite graph, RNA
+chains are all of the top 10 by degree and 7.9 of the top 10 by
+betweenness.
 
-**Small-world (combined graph).** sigma = 2.05 ± 0.19 and omega = -0.127 ±
-0.022 (mean ± SD over 135 frames), so the largest component is small-world by
-the usual omega window of -0.3 to 0.3.
+**Small-world (combined graph, every 10th frame in the window, 110 frames).**
+sigma = 2.12 ± 0.10 and omega = -0.134 ± 0.015 (mean ± SD), so the largest
+component is small-world by the usual omega window of -0.3 to 0.3.
 
 ## How to read the results
 
@@ -139,21 +160,26 @@ the usual omega window of -0.3 to 0.3.
 - **Persistent over k frames** means the RNA chain keeps contact with the same
   pair of protein chains in each of the last k frames. With the assumed
   10 ns spacing, k = 2 tests about 10 ns and k = 5 about 40 ns. The fraction
-  falls from 0.53 at k = 2 to 0.002 at k = 5. RNA chains in this droplet keep
+  falls from 0.53 at k = 2 to 0.0025 at k = 5. RNA chains in this droplet keep
   many partners at any moment but exchange them within tens of nanoseconds of
   coarse-grained time. Note that coarse-grained dynamics are faster than real
   dynamics, and the frame spacing is assumed.
 - **Hysteresis** only removes flicker between frames. It raises k = 2
-  persistence from 0.53 to 0.61 but does not change k = 5, because at 10 ns
+  persistence from 0.53 to 0.60 but does not change k = 5, because at 10 ns
   spacing most partner changes are real departures rather than brief breaks of
   a contact.
 - **Largest component fraction** below 1 with no percolation means the
   network is one droplet plus chains in the dilute phase, not a
   system-spanning network.
+- **Plateau window.** Averages over a period in which the droplet is still
+  growing mix two states. Check figure b before trusting any average, and
+  change the rule constants at the top of `run_analysis.py` if your system
+  needs a different one.
 
 ## Output files
 
-- `output/results.json`: settings, assumptions and time averages.
+- `output/results.json`: settings, assumptions, the plateau rule and
+  window, and time averages for the window and for all frames.
 - `output/per_frame.npz`: per-frame series (bridging, graph metrics, hub
   statistics by species, small-world) and all profile variants.
 - `output/fig_a_bridging.png`, `fig_b_graphs.png`, `fig_c_hubs.png`,
