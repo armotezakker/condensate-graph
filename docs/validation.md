@@ -173,9 +173,9 @@ seed range in 13 of 28 systems.
 
 ## Interpretation
 
-omega is reproduced to within about 0.001 in every system, which confirms
-that the graphs, the threshold, the temperatures and the choice of the
-largest component are right. sigma is not reproduced with the networkx
+omega and the edge counts match the published values, which confirms that
+the graphs, the threshold, the temperatures and the choice of the largest
+component are right. sigma is not reproduced with the networkx
 default reference and comes much closer with Erdos-Renyi references, so I
 think the published sigma used Erdos-Renyi random graphs as the reference;
 the article's methods mention Erdos-Renyi random graphs. This is an
