@@ -1,5 +1,8 @@
 # condensate-graph
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24542827.svg)](https://doi.org/10.5281/zenodo.24542827)
+[![tests](https://github.com/armotezakker/condensate-graph/actions/workflows/tests.yml/badge.svg)](https://github.com/armotezakker/condensate-graph/actions/workflows/tests.yml)
+
 condensate-graph turns coarse-grained simulations of protein-RNA condensates
 into chain-level contact networks and measures how RNA holds them together.
 It reads any trajectory that MDAnalysis can read (CALVADOS, HPS, Mpipi,
@@ -172,8 +175,12 @@ stochastic; the seed is explicit and the same seed gives the same result.
 
 ## Citation
 
-If you use condensate-graph, please cite it using the metadata in
-[CITATION.cff](CITATION.cff) (GitHub shows a "Cite this repository" button).
+If you use condensate-graph, please cite it. The software is archived on
+Zenodo: DOI [10.5281/zenodo.24542827](https://doi.org/10.5281/zenodo.24542827)
+covers all versions, and version 0.1.0 has its own DOI,
+[10.5281/zenodo.24542828](https://doi.org/10.5281/zenodo.24542828). The full
+metadata are in [CITATION.cff](CITATION.cff) (GitHub shows a "Cite this
+repository" button).
 If you use the worked example, please also cite the article and data it is
 based on, listed in its README.
 
