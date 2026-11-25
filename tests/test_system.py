@@ -6,7 +6,7 @@ import pytest
 import MDAnalysis as mda
 
 from condensate_graph.box import BoxError
-from condensate_graph.system import ChainIdentificationWarning, build_system
+from condensate_graph.system import ChainIdentificationWarning, build_system, chains_from_topology, fragment_problems
 
 # 2 protein chains (3 + 2 beads, one residue per bead) and 2 RNA chains (2 + 4 beads)
 PROTEIN_LENGTHS = [3, 2]
@@ -136,3 +136,68 @@ def test_iter_frames_without_box_raises():
 def test_explicit_box_used_when_trajectory_has_none():
     s = build_system(make_universe(dimensions=None), **SEL, by="segment", box=(15.0, 15.0, 60.0))
     np.testing.assert_allclose(next(s.iter_frames()).box, [15.0, 15.0, 60.0])
+
+
+# ------------------------------------------------ broken fragments (bonds partly missing)
+
+def chain_universe(n_chains=20, length=30, drop_bond=None, one_segment=False):
+    """n_chains linear chains of `length` beads; drop_bond(chain, i) -> True removes bond i-(i+1)."""
+    n = n_chains * length
+    chain = np.repeat(np.arange(n_chains), length)
+    segindex = np.zeros(n, dtype=int) if one_segment else chain
+    n_seg = 1 if one_segment else n_chains
+    u = mda.Universe.empty(n, n_residues=n, n_segments=n_seg, atom_resindex=np.arange(n),
+                           residue_segindex=segindex, trajectory=True)
+    u.add_TopologyAttr("name", ["CA"] * n)
+    u.add_TopologyAttr("segid", [f"S{k}" for k in range(n_seg)])
+    bonds = [(i, i + 1) for i in range(n - 1) if chain[i] == chain[i + 1]
+             and not (drop_bond and drop_bond(chain[i], i % length))]
+    u.add_TopologyAttr("bonds", bonds)
+    u.atoms.positions = np.zeros((n, 3), np.float32)
+    u.dimensions = [1000.0, 1000.0, 1000.0, 90, 90, 90]
+    return u
+
+
+def drop_some(chain, i):
+    # chains 0-9 lose every 6th bond, chains 10-19 keep all their bonds
+    return chain < 10 and i % 6 == 5
+
+
+def test_fragment_with_missing_bonds_warns_with_both_counts():
+    u = chain_universe(drop_bond=drop_some)
+    with pytest.warns(ChainIdentificationWarning) as rec:
+        chains = chains_from_topology(u.atoms, by="fragment", name="protein")
+    msg = str(rec[0].message)
+    assert chains.n_chains == 10 * 5 + 10
+    assert "60 fragments but 20 segments / chain IDs" in msg
+    assert "try by='segment'" in msg
+    assert "50 of 60 fragments" in msg  # 6-bead pieces are below a quarter of the typical 30
+
+
+def test_fragment_size_check_works_without_segment_information():
+    u = chain_universe(drop_bond=drop_some, one_segment=True)
+    with pytest.warns(ChainIdentificationWarning, match="fragments .* have fewer than") as rec:
+        chains_from_topology(u.atoms, by="fragment")
+    assert "fragments but" not in str(rec[0].message)
+
+
+def test_by_segment_recovers_chains_when_bonds_are_missing():
+    u = chain_universe(drop_bond=drop_some)
+    chains = chains_from_topology(u.atoms, by="segment")
+    assert chains.n_chains == 20 and set(chains.chain_sizes().tolist()) == {30}
+
+
+def test_complete_fragments_do_not_warn():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ChainIdentificationWarning)
+        chains = chains_from_topology(chain_universe().atoms, by="fragment")
+    assert chains.n_chains == 20
+    assert fragment_problems(chains) == []
+
+
+def test_fragment_crossing_segments_is_reported():
+    # chain bonds complete, plus one extra bond joining chains 0 and 1
+    u = chain_universe()
+    u.add_bonds([(29, 30)])
+    with pytest.warns(ChainIdentificationWarning, match=r"19 fragments but 20 segments .*1 fragments span more than one segment"):
+        chains_from_topology(u.atoms, by="fragment")

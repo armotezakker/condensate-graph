@@ -33,6 +33,7 @@ __all__ = [
     "ChainSystem",
     "chains_from_topology",
     "chains_from_lengths",
+    "fragment_problems",
     "build_system",
     "load_system",
 ]
@@ -143,7 +144,9 @@ def chains_from_topology(atoms, by: str, name: str = "selection") -> ChainSet:
         If ``by="segment"`` finds a single chain in a selection that spans
         more than one residue. Segment IDs alone cannot tell whether that is
         one long molecule or many molecules written under one chain ID, so
-        the result is kept but flagged.
+        the result is kept but flagged. Also if ``by="fragment"`` gives
+        fragments that look broken (see :func:`fragment_problems`); the
+        message reports the fragment and segment counts.
     """
     if by not in CHAIN_DEFINITIONS:
         raise ValueError(f"by must be one of {CHAIN_DEFINITIONS}, got {by!r}")
@@ -171,7 +174,75 @@ def chains_from_topology(atoms, by: str, name: str = "selection") -> ChainSet:
             "explicit chain_lengths"
         )
     chain_of_atom, ordered = _ordered_chain_index(atoms.fragindices)
-    return ChainSet(atoms=atoms, chain_of_atom=chain_of_atom, labels=tuple(int(k) for k in ordered))
+    chains = ChainSet(atoms=atoms, chain_of_atom=chain_of_atom, labels=tuple(int(k) for k in ordered))
+    problems = fragment_problems(chains)
+    if problems:
+        warnings.warn(
+            f"by='fragment' probably split the {name} selection into broken chains: "
+            + "; ".join(problems)
+            + ". This usually means bonds are missing from the topology; some PDB writers "
+            "leave out CONECT records for residue names they treat as standard, such as "
+            "the one-letter names A, C and G. Check the chains, and use by='segment' or "
+            "explicit chain_lengths if the segments / chain IDs are right.",
+            ChainIdentificationWarning,
+            stacklevel=3,
+        )
+    return chains
+
+
+# a fragment is "much smaller than typical" below this fraction of the typical size
+SMALL_FRAGMENT_FRACTION = 0.25
+# warn when more than this fraction of the fragments is much smaller than typical
+SMALL_FRAGMENT_SHARE = 0.10
+
+
+def fragment_problems(chains: ChainSet) -> list:
+    """Reasons to think that chains found by bonded fragments are broken.
+
+    Two checks, each giving one message when it fails:
+
+    * Size check: the typical fragment size is the size of the fragment the
+      median bead belongs to (so many tiny pieces do not drag it down). If
+      more than 10% of the fragments are smaller than a quarter of that,
+      the fragments look broken. A real mixture of long chains and many
+      small molecules also triggers this, so it is a warning, not an error.
+    * Segment check: if the selection spans more than one segment / chain
+      ID, the number of fragments should equal the number of segments, and
+      no fragment should cross a segment boundary.
+
+    Parameters
+    ----------
+    chains : ChainSet
+        Chains found with ``by="fragment"``.
+
+    Returns
+    -------
+    list of str
+        Empty if both checks pass.
+    """
+    problems = []
+    sizes = chains.chain_sizes()
+    if len(sizes) > 1:
+        per_bead = np.sort(sizes[chains.chain_of_atom])
+        typical = int(per_bead[len(per_bead) // 2])
+        small = sizes < SMALL_FRAGMENT_FRACTION * typical
+        if small.mean() > SMALL_FRAGMENT_SHARE:
+            problems.append(
+                f"{int(small.sum())} of {len(sizes)} fragments ({100 * small.mean():.0f}%) have fewer "
+                f"than {SMALL_FRAGMENT_FRACTION:g} x the typical size of {typical} beads "
+                f"(smallest {int(sizes.min())}, {int((sizes == 1).sum())} single beads)"
+            )
+    segindices = chains.atoms.segindices
+    n_segments = len(np.unique(segindices))
+    if n_segments > 1:
+        pairs = np.unique(np.column_stack([chains.chain_of_atom, segindices]), axis=0)
+        crossing = int((np.bincount(pairs[:, 0]) > 1).sum())
+        if len(sizes) != n_segments or crossing:
+            msg = f"{len(sizes)} fragments but {n_segments} segments / chain IDs"
+            if crossing:
+                msg += f" ({crossing} fragments span more than one segment)"
+            problems.append(msg + "; try by='segment'")
+    return problems
 
 
 def chains_from_lengths(atoms, lengths, name: str = "selection") -> ChainSet:
