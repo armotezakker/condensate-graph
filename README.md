@@ -173,6 +173,10 @@ stochastic; the seed is explicit and the same seed gives the same result.
 - sigma and omega are stochastic and slow on large graphs; compute them on a
   subsample of frames.
 
+## Acknowledgements
+
+This work was supported by the Swedish Research Council (grant no. 2025-06325).
+
 ## Citation
 
 If you use condensate-graph, please cite it. The software is archived on
